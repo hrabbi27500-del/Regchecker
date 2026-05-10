@@ -4,7 +4,7 @@
   "description": "WhatsApp Number Checker Telegram Bot with User Management",
   "main": "checker1_fast_fixed.js",
   "scripts": {
-    "start": "node checker1_fast_fixed.js",
+    "start": "Reg.js",
     "build": "npm install"
   },
   "dependencies": {
