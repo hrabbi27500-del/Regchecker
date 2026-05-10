@@ -25,7 +25,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '7390288812:AAGsGZriy4dprHYmQoRUZltMCmvTUitpz4I';
+const BOT_TOKEN = process.env.BOT_TOKEN || '6224828344:AAHUAHnOSaB5DUGfCtg9QqCWnNkDBRhxQE0';
 const ADMIN_ID = parseInt(process.env.ADMIN_ID) || 5624278091;
 const AUTH_FOLDER = 'auth_info';
 const CONCURRENCY = 100;
