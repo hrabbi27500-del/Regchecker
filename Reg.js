@@ -115,9 +115,6 @@ async function createWhatsAppConnection(ctx = null) {
       return;
     }
 
-    const authExists = fs.existsSync(AUTH_FOLDER);
-    console.log(`🔐 Auth folder exists: ${authExists}`);
-    
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const version = await getBaileysVersionSafe();
 
@@ -131,28 +128,28 @@ async function createWhatsAppConnection(ctx = null) {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (u) => {
-      const { connection, qr, lastDisconnect } = u;
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, qr, lastDisconnect } = update;
 
+      // --- QR CODE HANDLING ---
       if (qr) {
-        console.log('📱 New QR generated');
+        console.log('📱 New QR generated...');
         if (ctx) {
           try {
-            // QR code-ke buffer-e convert kora hochhe standard format-e
+            // QR string-ke PNG image buffer-e convert kora hochhe
             const qrBuffer = await QRCode.toBuffer(qr, { 
               type: 'png',
               margin: 3,
-              scale: 8 
+              scale: 9 
             });
-            
+
             await ctx.replyWithPhoto(
-              { source: qrBuffer }, 
-              { caption: '📲 **Scan this QR to link WhatsApp**\n\nSettings > Linked Devices > Link a Device' }
+              { source: qrBuffer },
+              { caption: '📲 **Scan this QR to link WhatsApp**\n\n1️⃣ Open WhatsApp on your phone\n2️⃣ Tap **Linked Devices**\n3️⃣ Tap **Link a Device**' }
             );
-          } catch (error) {
-            console.error('QR Send Error:', error);
-            // Buffer fail korle text hisebe pathabe
-            await ctx.reply(`📲 QR Code Text (Copy & Paste): \n\n\`${qr}\``, { parse_mode: 'Markdown' });
+          } catch (qrErr) {
+            console.error('QR Image generation failed:', qrErr);
+            await ctx.reply('❌ Image fail hoyeche. QR Code text:\n\n' + qr);
           }
         }
         
@@ -162,44 +159,44 @@ async function createWhatsAppConnection(ctx = null) {
             ctx?.reply('❌ QR expired. Send /connect again.');
             disconnectWA();
           }
-        }, 60000); // 1 minute timeout
+        }, 60000);
       }
 
+      // --- CONNECTION STATUS ---
       if (connection === 'open') {
         isConnected = true;
         if (qrTimeout) clearTimeout(qrTimeout);
         console.log('✅ WhatsApp connected!');
         if (ctx) {
-          await ctx.reply('✅ WhatsApp connected successfully! Now you can send numbers to check.');
+          await ctx.reply('✅ WhatsApp successly connected! Ekhon number pathate paren.');
         }
       }
 
       if (connection === 'close') {
         isConnected = false;
         const reason = lastDisconnect?.error?.output?.statusCode;
-        console.log(`🔌 WhatsApp disconnected. Reason code: ${reason}`);
-        
+        console.log(`🔌 Disconnected. Reason: ${reason}`);
+
         if (reason === DisconnectReason.loggedOut) {
-          if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Send /connect again.');
-          try {
-            fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-          } catch (error) {}
+          if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Re-scan required.');
+          try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
           sock = null;
         } else {
           console.log('🔁 Reconnecting in 5 seconds...');
           sock = null;
-          await delay(5000);
-          await createWhatsAppConnection(ctx);
+          setTimeout(() => createWhatsAppConnection(ctx), 5000);
         }
       }
     });
-  } catch (e) {
-    console.error('Connection function error:', e);
-    if (ctx) await ctx.reply('❌ Failed to initialize WhatsApp connection. Try /connect again.');
+
+  } catch (error) {
+    console.error('Global Connection Error:', error);
+    if (ctx) await ctx.reply('❌ Connection process failed. Please try /connect again.');
     isConnected = false;
     sock = null;
   }
 }
+
 
 
 // Auto reconnect if auth exists
