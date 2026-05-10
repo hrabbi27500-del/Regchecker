@@ -108,6 +108,7 @@ async function disconnectWA() {
   if (qrTimeout) clearTimeout(qrTimeout);
 }
 
+// Fix for QR code generation in createWhatsAppConnection function
 async function createWhatsAppConnection(ctx = null) {
   try {
     if (isConnected) {
@@ -127,6 +128,7 @@ async function createWhatsAppConnection(ctx = null) {
       logger: pino({ level: 'silent' }),
       browser: Browsers.macOS('Safari'),
       keepAliveIntervalMs: 30000,
+      printQRInTerminal: true, // This will print QR in console for debugging
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -136,17 +138,66 @@ async function createWhatsAppConnection(ctx = null) {
 
       if (qr) {
         console.log('📱 New QR generated');
+        console.log('QR String length:', qr.length); // Debug log
+        
         if (ctx) {
           try {
-            const qrImage = await QRCode.toBuffer(qr, { width: 350 });
-            await ctx.replyWithPhoto({ source: qrImage }, { caption: '📲 Scan QR to link WhatsApp' });
-          } catch (error) {
-            await ctx.reply(`📲 QR Code: ${qr}`);
+            // Generate QR code as buffer
+            const qrBuffer = await QRCode.toBuffer(qr, { 
+              type: 'png',
+              width: 400,
+              margin: 2,
+              errorCorrectionLevel: 'H'
+            });
+            
+            // Send as photo
+            await ctx.replyWithPhoto(
+              { source: qrBuffer },
+              { 
+                caption: '📲 **Scan this QR code with WhatsApp**\n\n' +
+                         '1. Open WhatsApp on your phone\n' +
+                         '2. Tap Menu (⋮) or Settings\n' +
+                         '3. Tap "Linked Devices"\n' +
+                         '4. Tap "Link a Device"\n' +
+                         '5. Scan this QR code\n\n' +
+                         '⏳ QR expires in 90 seconds',
+                parse_mode: 'Markdown'
+              }
+            );
+            
+            console.log('✅ QR code image sent successfully');
+          } catch (qrError) {
+            console.error('QR generation failed:', qrError);
+            
+            // Fallback: Send QR as text if image fails
+            try {
+              await ctx.reply(
+                '📲 **QR Code (Text Format)** - Scan manually:\n\n' +
+                '```\n' + qr + '\n```\n\n' +
+                'Or use: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + 
+                encodeURIComponent(qr),
+                { parse_mode: 'Markdown' }
+              );
+            } catch (textError) {
+              await ctx.reply('❌ Failed to generate QR code. Please check the console for QR data.');
+            }
           }
+        } else {
+          // No ctx (auto-connect), just log QR to console
+          console.log('QR Code (auto-connect mode):', qr.substring(0, 100) + '...');
         }
+        
+        // Clear previous timeout if exists
+        if (qrTimeout) clearTimeout(qrTimeout);
+        
+        // Set timeout for QR expiration
         qrTimeout = setTimeout(() => {
           if (!isConnected) {
-            ctx?.reply('❌ QR expired. Send /connect again.');
+            console.log('⏰ QR code expired');
+            if (ctx) {
+              ctx.reply('⏰ QR code expired. Please send /connect again.')
+                .catch(e => console.log('Cannot send expiry message'));
+            }
             disconnectWA();
           }
         }, 90000);
@@ -155,9 +206,9 @@ async function createWhatsAppConnection(ctx = null) {
       if (connection === 'open') {
         isConnected = true;
         if (qrTimeout) clearTimeout(qrTimeout);
-        console.log('✅ WhatsApp connected!');
+        console.log('✅ WhatsApp connected successfully!');
         if (ctx) {
-          await ctx.reply('✅ WhatsApp connected! Now you can send numbers to check.');
+          await ctx.reply('✅ **WhatsApp Connected Successfully!**\n\nNow you can send phone numbers to check.\n\n📞 Example:\n7828124894\n+18257976152', { parse_mode: 'Markdown' });
         }
       }
 
@@ -167,27 +218,99 @@ async function createWhatsAppConnection(ctx = null) {
         console.log(`🔌 WhatsApp disconnected. Reason: ${reason}`);
         
         if (reason === DisconnectReason.loggedOut) {
-          if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Send /connect again.');
+          console.log('🔄 Logged out, clearing auth folder...');
+          if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Send /connect to login again.');
           try {
-            fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-            console.log('🗑️ Auth folder cleared due to logout');
-          } catch (error) {}
+            // Clear auth folder
+            if (fs.existsSync(AUTH_FOLDER)) {
+              fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+              console.log('🗑️ Auth folder cleared');
+            }
+          } catch (error) {
+            console.error('Error clearing auth folder:', error);
+          }
           sock = null;
         } else {
-          console.log('🔁 WhatsApp disconnected, reconnecting in 10 seconds...');
+          console.log('🔁 Attempting to reconnect in 5 seconds...');
+          if (ctx) await ctx.reply('⚠️ Connection lost. Reconnecting...');
           sock = null;
-          await delay(10000);
+          await delay(5000);
           await createWhatsAppConnection(ctx);
         }
       }
     });
+    
+    // Handle socket errors
+    sock.ev.on('messaging-history.set', (data) => {
+      console.log('📨 Messaging history loaded');
+    });
+    
   } catch (e) {
     console.error('Connection error:', e);
-    if (ctx) await ctx.reply('❌ Failed to connect WhatsApp. Please try /connect again.');
+    if (ctx) {
+      await ctx.reply('❌ Failed to connect WhatsApp. Error: ' + e.message);
+    }
     isConnected = false;
     sock = null;
   }
 }
+
+// Add this as a new command for manual QR code generation
+bot.command('qr', async (ctx) => {
+  if (!isUserAllowed(ctx.from.id) && ctx.from.id !== ADMIN_ID) {
+    return ctx.reply('❌ Unauthorized');
+  }
+  
+  if (isConnected) {
+    return ctx.reply('✅ WhatsApp is already connected!');
+  }
+  
+  await ctx.reply('🔄 Attempting to generate QR code...');
+  
+  // Force disconnect and reconnect to generate new QR
+  await disconnectWA();
+  
+  // Create a temporary connection just for QR
+  try {
+    const { state } = await useMultiFileAuthState(AUTH_FOLDER);
+    const version = await getBaileysVersionSafe();
+    
+    const tempSock = makeWASocket({
+      version,
+      auth: state,
+      logger: pino({ level: 'silent' }),
+      browser: Browsers.macOS('Safari'),
+      printQRInTerminal: true,
+    });
+    
+    tempSock.ev.on('connection.update', async ({ qr }) => {
+      if (qr) {
+        try {
+          const qrBuffer = await QRCode.toBuffer(qr, { width: 400 });
+          await ctx.replyWithPhoto(
+            { source: qrBuffer },
+            { caption: '📲 Scan this QR code with WhatsApp to connect\n\n⏳ Expires in 90 seconds' }
+          );
+          
+          // Set timeout to close temp connection
+          setTimeout(() => {
+            tempSock.ws?.close();
+          }, 90000);
+        } catch (err) {
+          await ctx.reply('❌ QR generation failed. Please send /connect again.');
+        }
+      }
+    });
+    
+    // After QR is sent, close temp connection
+    setTimeout(() => {
+      if (tempSock) tempSock.ws?.close();
+    }, 95000);
+    
+  } catch (err) {
+    await ctx.reply('❌ Failed to generate QR. Error: ' + err.message);
+  }
+});
 
 // Auto reconnect if auth exists
 (async () => {
@@ -610,11 +733,11 @@ async function checkNumbersSuperFast(ctx, numbers) {
   const resultMessages = [];
   
   if (lalBaba.length > 0) {
-    resultMessages.push(`Kop 😂 (${lalBaba.length}):\n${lalBaba.join('\n')}`);
+    resultMessages.push(`🚫 Lal Baba (${lalBaba.length}):\n${lalBaba.join('\n')}`);
   }
   
   if (fresh.length > 0) {
-    resultMessages.push(`lal marbe 😐 (${fresh.length}):\n${fresh.join('\n')}`);
+    resultMessages.push(`✅ Fresh (${fresh.length}):\n${fresh.join('\n')}`);
   }
   
   if (errorNums.length > 0) {
