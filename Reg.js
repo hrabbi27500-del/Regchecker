@@ -1,4 +1,4 @@
-// checker_super_fast.js - ULTRA FAST WhatsApp Checker
+// checker_super_fast.js - ULTRA FAST WhatsApp Checker (Fixed QR Repetition)
 const { Telegraf } = require('telegraf');
 const {
   makeWASocket,
@@ -33,6 +33,10 @@ const USER_DATA_FILE = 'users.json';
 let sock = null;
 let isConnected = false;
 let qrTimeout = null;
+let isConnecting = false;  // Track if connection is in progress
+let lastQRTime = 0;       // Track last QR send time
+let qrSentCount = 0;      // Count QR sends
+const MAX_QR_RETRIES = 1; // Only send QR once
 
 // User management system
 let allowedUsers = new Set();
@@ -105,17 +109,26 @@ async function disconnectWA() {
     sock = null;
   }
   isConnected = false;
+  isConnecting = false;
   if (qrTimeout) clearTimeout(qrTimeout);
 }
 
-// Fix for QR code generation in createWhatsAppConnection function
 async function createWhatsAppConnection(ctx = null) {
   try {
+    // Prevent multiple simultaneous connection attempts
+    if (isConnecting) {
+      console.log('⚠️ Connection already in progress, skipping...');
+      if (ctx) await ctx.reply('⏳ Connection already in progress. Please wait...');
+      return;
+    }
+    
     if (isConnected) {
       if (ctx) await ctx.reply('✅ WhatsApp is already connected!');
       return;
     }
 
+    isConnecting = true;
+    
     const authExists = fs.existsSync(AUTH_FOLDER);
     console.log(`🔐 Auth folder exists: ${authExists}`);
     
@@ -128,7 +141,9 @@ async function createWhatsAppConnection(ctx = null) {
       logger: pino({ level: 'silent' }),
       browser: Browsers.macOS('Safari'),
       keepAliveIntervalMs: 30000,
-      printQRInTerminal: true, // This will print QR in console for debugging
+      printQRInTerminal: true,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -137,12 +152,30 @@ async function createWhatsAppConnection(ctx = null) {
       const { connection, qr, lastDisconnect } = u;
 
       if (qr) {
-        console.log('📱 New QR generated');
-        console.log('QR String length:', qr.length); // Debug log
+        const now = Date.now();
+        
+        // Rate limit QR sending (only send every 30 seconds)
+        if (now - lastQRTime < 30000) {
+          console.log('⏸️ QR rate limited, skipping...');
+          return;
+        }
+        
+        // Limit QR retries - only send once
+        if (qrSentCount >= MAX_QR_RETRIES) {
+          console.log('❌ Max QR retries reached, stopping...');
+          if (ctx && qrSentCount === MAX_QR_RETRIES) {
+            await ctx.reply('❌ QR code already sent. Please scan the QR code I sent earlier.\n\nIf expired, send /connect again.');
+          }
+          return;
+        }
+        
+        lastQRTime = now;
+        qrSentCount++;
+        
+        console.log(`📱 New QR generated (Sending once)`);
         
         if (ctx) {
           try {
-            // Generate QR code as buffer
             const qrBuffer = await QRCode.toBuffer(qr, { 
               type: 'png',
               width: 400,
@@ -150,7 +183,6 @@ async function createWhatsAppConnection(ctx = null) {
               errorCorrectionLevel: 'H'
             });
             
-            // Send as photo
             await ctx.replyWithPhoto(
               { source: qrBuffer },
               { 
@@ -160,51 +192,45 @@ async function createWhatsAppConnection(ctx = null) {
                          '3. Tap "Linked Devices"\n' +
                          '4. Tap "Link a Device"\n' +
                          '5. Scan this QR code\n\n' +
-                         '⏳ QR expires in 90 seconds',
+                         '⏳ QR expires in 2 minutes\n\n' +
+                         '⚠️ Only ONE QR will be sent. If expired, send /connect again.',
                 parse_mode: 'Markdown'
               }
             );
-            
             console.log('✅ QR code image sent successfully');
           } catch (qrError) {
             console.error('QR generation failed:', qrError);
-            
-            // Fallback: Send QR as text if image fails
             try {
               await ctx.reply(
-                '📲 **QR Code (Text Format)** - Scan manually:\n\n' +
-                '```\n' + qr + '\n```\n\n' +
-                'Or use: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + 
-                encodeURIComponent(qr),
-                { parse_mode: 'Markdown' }
+                '📲 **QR Code Failed to Generate**\n\n' +
+                'Please try again with /connect\n\n' +
+                'Error: ' + qrError.message
               );
             } catch (textError) {
-              await ctx.reply('❌ Failed to generate QR code. Please check the console for QR data.');
+              console.error('Fallback also failed:', textError);
             }
           }
-        } else {
-          // No ctx (auto-connect), just log QR to console
-          console.log('QR Code (auto-connect mode):', qr.substring(0, 100) + '...');
         }
         
-        // Clear previous timeout if exists
+        // Clear previous timeout
         if (qrTimeout) clearTimeout(qrTimeout);
         
-        // Set timeout for QR expiration
+        // Set timeout for QR expiration - but don't auto reconnect
         qrTimeout = setTimeout(() => {
           if (!isConnected) {
-            console.log('⏰ QR code expired');
+            console.log('⏰ QR expired');
+            isConnecting = false;
             if (ctx) {
-              ctx.reply('⏰ QR code expired. Please send /connect again.')
-                .catch(e => console.log('Cannot send expiry message'));
+              ctx.reply('⏰ QR code expired. Send /connect again to get a new QR.').catch(e => console.log('Cannot send expiry message'));
             }
-            disconnectWA();
           }
-        }, 90000);
+        }, 120000);
       }
 
       if (connection === 'open') {
         isConnected = true;
+        isConnecting = false;
+        qrSentCount = 0;
         if (qrTimeout) clearTimeout(qrTimeout);
         console.log('✅ WhatsApp connected successfully!');
         if (ctx) {
@@ -221,7 +247,6 @@ async function createWhatsAppConnection(ctx = null) {
           console.log('🔄 Logged out, clearing auth folder...');
           if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Send /connect to login again.');
           try {
-            // Clear auth folder
             if (fs.existsSync(AUTH_FOLDER)) {
               fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
               console.log('🗑️ Auth folder cleared');
@@ -230,89 +255,27 @@ async function createWhatsAppConnection(ctx = null) {
             console.error('Error clearing auth folder:', error);
           }
           sock = null;
+          isConnecting = false;
+          qrSentCount = 0;
         } else {
-          console.log('🔁 Attempting to reconnect in 5 seconds...');
-          if (ctx) await ctx.reply('⚠️ Connection lost. Reconnecting...');
+          // Don't auto-reconnect - user must send /connect manually
+          console.log('⚠️ Disconnected. Use /connect to reconnect manually');
           sock = null;
-          await delay(5000);
-          await createWhatsAppConnection(ctx);
+          isConnecting = false;
         }
       }
-    });
-    
-    // Handle socket errors
-    sock.ev.on('messaging-history.set', (data) => {
-      console.log('📨 Messaging history loaded');
     });
     
   } catch (e) {
     console.error('Connection error:', e);
-    if (ctx) {
-      await ctx.reply('❌ Failed to connect WhatsApp. Error: ' + e.message);
-    }
+    if (ctx) await ctx.reply('❌ Failed to connect WhatsApp. Error: ' + e.message);
     isConnected = false;
+    isConnecting = false;
     sock = null;
   }
 }
 
-// Add this as a new command for manual QR code generation
-bot.command('qr', async (ctx) => {
-  if (!isUserAllowed(ctx.from.id) && ctx.from.id !== ADMIN_ID) {
-    return ctx.reply('❌ Unauthorized');
-  }
-  
-  if (isConnected) {
-    return ctx.reply('✅ WhatsApp is already connected!');
-  }
-  
-  await ctx.reply('🔄 Attempting to generate QR code...');
-  
-  // Force disconnect and reconnect to generate new QR
-  await disconnectWA();
-  
-  // Create a temporary connection just for QR
-  try {
-    const { state } = await useMultiFileAuthState(AUTH_FOLDER);
-    const version = await getBaileysVersionSafe();
-    
-    const tempSock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({ level: 'silent' }),
-      browser: Browsers.macOS('Safari'),
-      printQRInTerminal: true,
-    });
-    
-    tempSock.ev.on('connection.update', async ({ qr }) => {
-      if (qr) {
-        try {
-          const qrBuffer = await QRCode.toBuffer(qr, { width: 400 });
-          await ctx.replyWithPhoto(
-            { source: qrBuffer },
-            { caption: '📲 Scan this QR code with WhatsApp to connect\n\n⏳ Expires in 90 seconds' }
-          );
-          
-          // Set timeout to close temp connection
-          setTimeout(() => {
-            tempSock.ws?.close();
-          }, 90000);
-        } catch (err) {
-          await ctx.reply('❌ QR generation failed. Please send /connect again.');
-        }
-      }
-    });
-    
-    // After QR is sent, close temp connection
-    setTimeout(() => {
-      if (tempSock) tempSock.ws?.close();
-    }, 95000);
-    
-  } catch (err) {
-    await ctx.reply('❌ Failed to generate QR. Error: ' + err.message);
-  }
-});
-
-// Auto reconnect if auth exists
+// Auto connect if auth exists (but don't spam QR)
 (async () => {
   if (fs.existsSync(AUTH_FOLDER)) {
     console.log('🔄 Auth found → auto-connecting WhatsApp...');
@@ -455,6 +418,7 @@ bot.start(async (ctx) => {
       `👋 Welcome Admin ${userName}!\n\n` +
       `📋 Available Commands:\n` +
       `/connect - Link WhatsApp\n` +
+      `/disconnect - Disconnect WhatsApp\n` +
       `/users - Manage users\n` +
       `/pending - Show pending requests\n` +
       `/stats - Show bot statistics\n` +
@@ -514,15 +478,45 @@ bot.start(async (ctx) => {
 
 bot.command('connect', async (ctx) => {
   if (!isUserAllowed(ctx.from.id) && ctx.from.id !== ADMIN_ID) {
-    return ctx.reply('❌ You are not authorized to use this bot. Wait for admin approval.');
+    return ctx.reply('❌ You are not authorized to use this bot.');
   }
   
   if (isConnected) {
-    return ctx.reply('✅ WhatsApp is already connected! You can send numbers to check now.');
+    return ctx.reply('✅ WhatsApp is already connected!');
   }
   
-  await ctx.reply('🔄 Connecting to WhatsApp... Please wait.');
+  if (isConnecting) {
+    return ctx.reply('⏳ Already connecting. Please wait...');
+  }
+  
+  // Reset counters for fresh connection
+  qrSentCount = 0;
+  lastQRTime = 0;
+  
+  await ctx.reply('🔄 Connecting to WhatsApp... Please wait.\n\n📱 You will receive ONE QR code to scan.');
   await createWhatsAppConnection(ctx);
+  
+  // Auto timeout after 3 minutes
+  setTimeout(async () => {
+    if (!isConnected && isConnecting) {
+      await disconnectWA();
+      if (ctx) {
+        ctx.reply('⏰ Connection timeout. Please send /connect again.').catch(e => console.log('Timeout message failed'));
+      }
+    }
+  }, 3 * 60 * 1000);
+});
+
+bot.command('disconnect', async (ctx) => {
+  if (!isUserAllowed(ctx.from.id) && ctx.from.id !== ADMIN_ID) {
+    return ctx.reply('❌ Unauthorized');
+  }
+  
+  await disconnectWA();
+  qrSentCount = 0;
+  if (qrTimeout) clearTimeout(qrTimeout);
+  
+  await ctx.reply('🔌 WhatsApp disconnected. Send /connect to reconnect.');
 });
 
 bot.command('users', async (ctx) => {
@@ -814,9 +808,6 @@ setInterval(async () => {
 setTimeout(async () => {
   await pingServer();
 }, 15000);
-
-
-
 
 console.log('🚀 WhatsApp Number Checker Bot Started!');
 console.log('⚡ SUPER FAST MODE: ENABLED');
