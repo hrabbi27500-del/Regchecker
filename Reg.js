@@ -131,25 +131,47 @@ async function createWhatsAppConnection(ctx = null) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, qr, lastDisconnect } = update;
 
-      // --- QR CODE HANDLING ---
       if (qr) {
-        console.log('📱 New QR generated...');
+        console.log('📱 QR Generated, attempting to send to Telegram...');
         if (ctx) {
           try {
-            // QR string-ke PNG image buffer-e convert kora hochhe
             const qrBuffer = await QRCode.toBuffer(qr, { 
               type: 'png',
               margin: 3,
               scale: 9 
             });
 
-            await ctx.replyWithPhoto(
-              { source: qrBuffer },
-              { caption: '📲 **Scan this QR to link WhatsApp**\n\n1️⃣ Open WhatsApp on your phone\n2️⃣ Tap **Linked Devices**\n3️⃣ Tap **Link a Device**' }
-            );
-          } catch (qrErr) {
-            console.error('QR Image generation failed:', qrErr);
-            await ctx.reply('❌ Image fail hoyeche. QR Code text:\n\n' + qr);
+            // --- RETRY LOGIC FOR TELEGRAM API ---
+            let sent = false;
+            let attempts = 0;
+            while (!sent && attempts < 3) {
+              try {
+                attempts++;
+                await ctx.replyWithPhoto(
+                  { source: qrBuffer },
+                  { caption: `📲 **Scan this QR (Attempt ${attempts}/3)**\n\nSettings > Linked Devices > Link a Device` }
+                );
+                sent = true;
+                console.log('✅ QR Image sent on attempt:', attempts);
+              } catch (sendErr) {
+                console.error(`❌ Attempt ${attempts} failed:`, sendErr.message);
+                if (attempts >= 3) throw sendErr; // ৩ বার ফেল করলে এরর থ্রো করবে
+                await new Promise(res => setTimeout(res, 2000)); // ২ সেকেন্ড গ্যাপ দিয়ে আবার চেষ্টা
+              }
+            }
+
+          } catch (finalErr) {
+            console.error('❌ Critical: Failed to send photo even after retries.');
+            // ফটো ফেইল করলে ফাইল (Document) হিসেবে পাঠানোর শেষ চেষ্টা
+            try {
+               const qrBuffer = await QRCode.toBuffer(qr, { type: 'png' });
+               await ctx.replyWithDocument(
+                 { source: qrBuffer, filename: 'whatsapp_qr.png' },
+                 { caption: '⚠️ Image send failed. Try scanning this file instead.' }
+               );
+            } catch (docErr) {
+               await ctx.reply('❌ QR Image sending failed due to network issues. \n\nQR String:\n`' + qr + '`');
+            }
           }
         }
         
@@ -162,27 +184,20 @@ async function createWhatsAppConnection(ctx = null) {
         }, 60000);
       }
 
-      // --- CONNECTION STATUS ---
       if (connection === 'open') {
         isConnected = true;
         if (qrTimeout) clearTimeout(qrTimeout);
         console.log('✅ WhatsApp connected!');
-        if (ctx) {
-          await ctx.reply('✅ WhatsApp successly connected! Ekhon number pathate paren.');
-        }
+        if (ctx) await ctx.reply('✅ WhatsApp connected successfully!');
       }
 
       if (connection === 'close') {
         isConnected = false;
         const reason = lastDisconnect?.error?.output?.statusCode;
-        console.log(`🔌 Disconnected. Reason: ${reason}`);
-
         if (reason === DisconnectReason.loggedOut) {
-          if (ctx) await ctx.reply('❌ Logged out from WhatsApp. Re-scan required.');
           try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
           sock = null;
         } else {
-          console.log('🔁 Reconnecting in 5 seconds...');
           sock = null;
           setTimeout(() => createWhatsAppConnection(ctx), 5000);
         }
@@ -190,14 +205,11 @@ async function createWhatsAppConnection(ctx = null) {
     });
 
   } catch (error) {
-    console.error('Global Connection Error:', error);
-    if (ctx) await ctx.reply('❌ Connection process failed. Please try /connect again.');
+    console.error('Global Error:', error);
     isConnected = false;
     sock = null;
   }
 }
-
-
 
 // Auto reconnect if auth exists
 (async () => {
