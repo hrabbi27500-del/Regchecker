@@ -124,6 +124,8 @@ async function createWhatsAppConnection(ctx = null) {
       logger: pino({ level: 'silent' }),
       browser: Browsers.macOS('Safari'),
       keepAliveIntervalMs: 30000,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -131,83 +133,168 @@ async function createWhatsAppConnection(ctx = null) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, qr, lastDisconnect } = update;
 
+      // ================= QR GENERATED =================
       if (qr) {
-        console.log('📱 QR Generated, attempting to send to Telegram...');
+        console.log('📱 QR Generated, sending to Telegram...');
+
         if (ctx) {
           try {
-            const qrBuffer = await QRCode.toBuffer(qr, { 
+            // QR Buffer Generate
+            const qrBuffer = await QRCode.toBuffer(qr, {
               type: 'png',
-              margin: 3,
-              scale: 9 
+              width: 500,
+              margin: 2,
+              errorCorrectionLevel: 'M'
             });
 
-            // --- RETRY LOGIC FOR TELEGRAM API ---
+            // Temp file path
+            const tempPath = path.join(__dirname, `qr_${Date.now()}.png`);
+
+            // Save temp file
+            fs.writeFileSync(tempPath, qrBuffer);
+
             let sent = false;
             let attempts = 0;
+
             while (!sent && attempts < 3) {
               try {
                 attempts++;
-                await ctx.replyWithPhoto(
-                  { source: qrBuffer },
-                  { caption: `📲 **Scan this QR (Attempt ${attempts}/3)**\n\nSettings > Linked Devices > Link a Device` }
+
+                // Send as DOCUMENT (more stable)
+                await ctx.replyWithDocument(
+                  {
+                    source: tempPath,
+                    filename: 'whatsapp_qr.png'
+                  },
+                  {
+                    caption:
+                      `📲 Scan this QR (Attempt ${attempts}/3)\n\n` +
+                      `WhatsApp > Linked Devices > Link a Device`,
+                    disable_notification: true
+                  }
                 );
+
                 sent = true;
-                console.log('✅ QR Image sent on attempt:', attempts);
+
+                console.log(`✅ QR sent successfully (Attempt ${attempts})`);
+
               } catch (sendErr) {
+
                 console.error(`❌ Attempt ${attempts} failed:`, sendErr.message);
-                if (attempts >= 3) throw sendErr; // ৩ বার ফেল করলে এরর থ্রো করবে
-                await new Promise(res => setTimeout(res, 2000)); // ২ সেকেন্ড গ্যাপ দিয়ে আবার চেষ্টা
+
+                if (attempts >= 3) throw sendErr;
+
+                // wait 5 sec before retry
+                await new Promise(res => setTimeout(res, 5000));
               }
             }
 
-          } catch (finalErr) {
-            console.error('❌ Critical: Failed to send photo even after retries.');
-            // ফটো ফেইল করলে ফাইল (Document) হিসেবে পাঠানোর শেষ চেষ্টা
+            // Delete temp file
             try {
-               const qrBuffer = await QRCode.toBuffer(qr, { type: 'png' });
-               await ctx.replyWithDocument(
-                 { source: qrBuffer, filename: 'whatsapp_qr.png' },
-                 { caption: '⚠️ Image send failed. Try scanning this file instead.' }
-               );
-            } catch (docErr) {
-               await ctx.reply('❌ QR Image sending failed due to network issues. \n\nQR String:\n`' + qr + '`');
+              fs.unlinkSync(tempPath);
+            } catch (e) {}
+
+          } catch (finalErr) {
+
+            console.error('❌ Failed to send QR:', finalErr);
+
+            // Last fallback → send QR text
+            try {
+              await ctx.reply(
+                '❌ QR image sending failed.\n\n' +
+                'Use this raw QR instead:\n\n' +
+                '`' + qr + '`',
+                {
+                  parse_mode: 'Markdown'
+                }
+              );
+            } catch (e) {
+              console.error('Fallback QR text send failed:', e);
             }
           }
         }
-        
+
+        // QR Timeout
         if (qrTimeout) clearTimeout(qrTimeout);
-        qrTimeout = setTimeout(() => {
+
+        qrTimeout = setTimeout(async () => {
           if (!isConnected) {
-            ctx?.reply('❌ QR expired. Send /connect again.');
+            try {
+              await ctx?.reply('❌ QR expired. Send /connect again.');
+            } catch (e) {}
+
             disconnectWA();
           }
         }, 60000);
       }
 
+      // ================= CONNECTED =================
       if (connection === 'open') {
+
         isConnected = true;
+
         if (qrTimeout) clearTimeout(qrTimeout);
+
         console.log('✅ WhatsApp connected!');
-        if (ctx) await ctx.reply('✅ WhatsApp connected successfully!');
+
+        if (ctx) {
+          try {
+            await ctx.reply('✅ WhatsApp connected successfully!');
+          } catch (e) {}
+        }
       }
 
+      // ================= CONNECTION CLOSED =================
       if (connection === 'close') {
+
         isConnected = false;
+
         const reason = lastDisconnect?.error?.output?.statusCode;
+
+        console.log('❌ Connection closed. Reason:', reason);
+
         if (reason === DisconnectReason.loggedOut) {
-          try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
+
+          console.log('⚠️ Logged out. Clearing session...');
+
+          try {
+            fs.rmSync(AUTH_FOLDER, {
+              recursive: true,
+              force: true
+            });
+          } catch (e) {}
+
           sock = null;
+
         } else {
+
+          console.log('🔄 Reconnecting in 5 seconds...');
+
           sock = null;
-          setTimeout(() => createWhatsAppConnection(ctx), 5000);
+
+          setTimeout(() => {
+            createWhatsAppConnection(ctx);
+          }, 5000);
         }
       }
     });
 
   } catch (error) {
-    console.error('Global Error:', error);
+
+    console.error('❌ Global Error:', error);
+
     isConnected = false;
+
     sock = null;
+
+    if (ctx) {
+      try {
+        await ctx.reply(
+          '❌ Failed to initialize WhatsApp connection.\n\n' +
+          'Please try again later.'
+        );
+      } catch (e) {}
+    }
   }
 }
 
