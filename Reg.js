@@ -610,11 +610,11 @@ async function checkNumbersSuperFast(ctx, numbers) {
   const resultMessages = [];
   
   if (lalBaba.length > 0) {
-    resultMessages.push(`🚫 Lal Baba (${lalBaba.length}):\n${lalBaba.join('\n')}`);
+    resultMessages.push(`Kop 😂 (${lalBaba.length}):\n${lalBaba.join('\n')}`);
   }
   
   if (fresh.length > 0) {
-    resultMessages.push(`✅ Fresh (${fresh.length}):\n${fresh.join('\n')}`);
+    resultMessages.push(`lal marbe 😐 (${fresh.length}):\n${fresh.join('\n')}`);
   }
   
   if (errorNums.length > 0) {
